@@ -1,8 +1,24 @@
 import AppKit
 import Foundation
+import SessionPolicy
 
 // Broken worker pipes should surface as write errors, not terminate the UI.
 signal(SIGPIPE, SIG_IGN)
+
+if CommandLine.arguments.contains("--watch") {
+    let values = CommandLine.arguments.last?.split(separator: ",").map(String.init) ?? []
+    let triggers = Set(values.compactMap(ActivityTrigger.init(rawValue:)))
+    guard !triggers.isEmpty, triggers.count == Set(values).count else { exit(64) }
+    runWorker(seconds: 0, triggers: triggers)
+}
+
+if CommandLine.arguments.contains("--diagnose-triggers") {
+    do {
+        let matches = try ActivityMonitor.matching(Set(ActivityTrigger.allCases))
+        print(matches.map(\.title).joined(separator: "\n"))
+    } catch { print(error.localizedDescription); exit(1) }
+    exit(0)
+}
 
 if CommandLine.arguments.contains("--worker") {
     guard let last = CommandLine.arguments.last, let seconds = Double(last),
@@ -27,6 +43,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var quitting = false
     private var buffer = ""
     private var observer: NSObjectProtocol?
+    private var watching = false
+    private var selectedTriggers = Set<ActivityTrigger>(
+        (UserDefaults.standard.stringArray(forKey: "selectedTriggers") ?? ["terminal"])
+            .compactMap(ActivityTrigger.init(rawValue:)))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Only one UI should own the shared lid setting.
@@ -47,6 +67,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(title)
         menu.addItem(NSMenuItem(title: status, action: nil, keyEquivalent: ""))
         menu.addItem(.separator())
+        let triggerItem = NSMenuItem(title: "Trigger-Based", action: nil, keyEquivalent: "")
+        triggerItem.state = watching ? .on : .off
+        let triggersMenu = NSMenu()
+        triggersMenu.autoenablesItems = false
+        let enable = NSMenuItem(title: watching ? "Stop Watching" : "Watch Selected Triggers", action: #selector(toggleWatching), keyEquivalent: "")
+        enable.target = self
+        enable.isEnabled = watching || (worker == nil && !selectedTriggers.isEmpty)
+        enable.state = watching ? .on : .off
+        triggersMenu.addItem(enable)
+        triggersMenu.addItem(.separator())
+        for (index, trigger) in ActivityTrigger.allCases.enumerated() {
+            let choice = NSMenuItem(title: trigger.title, action: #selector(toggleTrigger(_:)), keyEquivalent: "")
+            choice.tag = index; choice.target = self
+            choice.state = selectedTriggers.contains(trigger) ? .on : .off
+            choice.isEnabled = worker == nil
+            triggersMenu.addItem(choice)
+        }
+        triggersMenu.addItem(.separator())
+        let hint = NSMenuItem(title: "Keeps awake while ANY selection runs", action: nil, keyEquivalent: "")
+        hint.isEnabled = false; triggersMenu.addItem(hint)
+        triggerItem.submenu = triggersMenu
+        menu.addItem(triggerItem)
         if worker == nil {
             for (label, minutes) in [("Keep Awake for 30 Minutes", 30), ("Keep Awake for 1 Hour", 60), ("Keep Awake for 2 Hours", 120)] {
                 let choice = NSMenuItem(title: label, action: #selector(start(_:)), keyEquivalent: "")
@@ -68,31 +110,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func start(_ sender: NSMenuItem) {
+        launchWorker(seconds: sender.tag * 60, watch: false)
+    }
+
+    @objc private func toggleTrigger(_ sender: NSMenuItem) {
+        guard worker == nil else { return }
+        let trigger = ActivityTrigger.allCases[sender.tag]
+        if selectedTriggers.contains(trigger) { selectedTriggers.remove(trigger) }
+        else { selectedTriggers.insert(trigger) }
+        UserDefaults.standard.set(selectedTriggers.map(\.rawValue).sorted(), forKey: "selectedTriggers")
+        rebuild()
+    }
+
+    @objc private func toggleWatching() {
+        if watching { stop() }
+        else if !selectedTriggers.isEmpty { launchWorker(seconds: 0, watch: true) }
+    }
+
+    private func launchWorker(seconds: Int, watch: Bool) {
         guard worker == nil else { return }
         if !UserDefaults.standard.bool(forKey: "acknowledgedExperimentalControl") {
             let alert = NSAlert()
             alert.messageText = "Keep working with the lid closed"
-            alert.informativeText = "LidKeeper uses a private macOS lid control. Explicit sleep remains available by design, but lid and power-button behavior need testing on your Mac. Other keep-awake apps or macOS can override this shared control. Keep your Mac ventilated while closed. Sessions stop at 20% battery, high heat, or the time limit."
+            alert.informativeText = "LidKeeper uses a private macOS lid control. Explicit sleep remains available by design, but lid and power-button behavior need testing on your Mac. Keep your Mac ventilated while closed. Sessions stop at 20% battery or high heat. Timed sessions expire; trigger-based sessions watch until you stop them or request sleep."
             alert.addButton(withTitle: "Start Session"); alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             UserDefaults.standard.set(true, forKey: "acknowledgedExperimentalControl")
         }
         let process = Process(), commands = Pipe(), output = Pipe()
         process.executableURL = Bundle.main.executableURL
-        process.arguments = ["--worker", String(sender.tag * 60)]
+        process.arguments = watch ? ["--watch", selectedTriggers.map(\.rawValue).sorted().joined(separator: ",")] : ["--worker", String(seconds)]
         process.standardInput = commands; process.standardOutput = output; process.standardError = output
         buffer = ""; status = "Starting…"
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        output.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
             let data = handle.availableData
             if data.isEmpty { handle.readabilityHandler = nil; return }
             let text = String(decoding: data, as: UTF8.self)
-            DispatchQueue.main.async { self?.receive(text) }
+            DispatchQueue.main.async {
+                guard let self, let process, self.worker === process else { return }
+                self.receive(text)
+            }
         }
         process.terminationHandler = { [weak self] process in
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.worker = nil; self.input = nil; self.active = false
-                if self.status == "Starting…" || self.status.hasPrefix("Awake") {
+                guard let self, self.worker === process else { return }
+                self.worker = nil; self.input = nil; self.active = false; self.watching = false
+                if self.status == "Starting…" || self.status.hasPrefix("Awake") || self.status.hasPrefix("Watching") {
                     self.status = process.terminationStatus == 0 ? "Session ended" : "Session failed — see diagnostics"
                 }
                 self.rebuild()
@@ -104,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Close the parent's copy of the child's stdin read end.
             commands.fileHandleForReading.closeFile()
             output.fileHandleForWriting.closeFile()
-            worker = process; input = commands
+            worker = process; input = commands; watching = watch
         } catch { status = error.localizedDescription }
         rebuild()
     }
@@ -114,6 +177,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         while let newline = buffer.firstIndex(of: "\n") {
             let line = String(buffer[..<newline]); buffer.removeSubrange(...newline)
             if line == "READY" { active = true; status = "Awake with lid closed · session active" }
+            else if line == "WATCHING" || line == "WAITING" {
+                active = false; status = "Watching · no selected triggers running"
+            }
+            else if line.hasPrefix("ACTIVE ") {
+                active = true; status = "Awake · " + String(line.dropFirst(7))
+            }
             else if line.hasPrefix("STOPPED ") { active = false; status = String(line.dropFirst(8)) }
             else if line.hasPrefix("ERROR ") {
                 active = false; status = "Could not complete session"

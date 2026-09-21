@@ -17,6 +17,20 @@ open dist/LidKeeper.app
 
 Click the laptop icon in the menu bar and choose a 30-minute, 1-hour, or 2-hour session. The app starts inactive. No login item, privileged helper, or permanent power preference is installed. The local build is ad-hoc signed, not notarized.
 
+### Trigger-based sessions
+
+Open **Trigger-Based**, check the activities you want to watch, then choose **Watch Selected Triggers**. Multiple selections mean **any selected activity** can keep your Mac awake:
+
+- **Terminal Sessions**: a shell attached to a terminal under your user account. Includes idle prompts and shells in Terminal, iTerm, editor terminals, SSH, and tmux. An app with no shell session does not count. Supported shells: sh, bash, zsh, fish, nu, xonsh, tcsh, csh.
+- **Codex CLI / Claude Code**: an executable named `codex` or `claude` attached to a terminal. This detects a running CLI, not whether the agent is currently generating a response. Wrappers reported only as `node` or another executable are not recognized.
+- **Codex App / Claude Desktop / Visual Studio Code / Cursor**: the desktop app is running, even if it has no open windows. Quit it to stop matching.
+
+The worker checks about every two seconds. It acquires keep-awake controls when any selection matches, releases them when none match, and continues watching. Waiting does not hold a power assertion. The menu shows the matching activities, or “Watching · no selected triggers running.” Watching has no fixed time limit and cannot wake an already sleeping Mac.
+
+**Stop Watching**, **End Session**, manual system sleep, quitting, a monitoring error, or a battery/thermal cutoff disarms watching completely. Re-enable it explicitly afterward. To change selections, stop watching first. Selections are remembered, but watching never starts automatically on launch. Timed sessions and watching are mutually exclusive.
+
+Monitoring reads only your account's executable names and terminal assignments, plus running app bundle identifiers. It does not read terminal contents, command arguments, prompts, or project files. No Accessibility or Automation permission is needed. A sandbox or system policy that blocks process inspection will stop watching with an error.
+
 Sessions end at the time limit, at or below 20% while on battery, on serious/critical thermal pressure, when battery readings are unavailable on battery, or when the app exits. Checks run every two seconds. Keep the closed Mac ventilated; don't put an active Mac in a bag.
 
 **Sleep Now** ends the session and requests system sleep. An explicit system sleep notification also ends the session, so it will not automatically reactivate after waking. Touch ID buttons can lock the screen instead of requesting system sleep; LidKeeper does not remap the physical button.
@@ -57,6 +71,7 @@ Apple source references:
 swift run PolicyChecks
 bash scripts/build.sh
 .build/release/LidKeeper --diagnose
+.build/release/LidKeeper --diagnose-triggers
 ```
 
 Policy checks exercise battery, time, thermal, and parent-liveness decisions without requiring XCTest or a full Xcode installation. CI builds the app on macOS. Neither substitutes for testing sleep transitions on a physical MacBook.
@@ -74,6 +89,8 @@ Manual test checklist (save ongoing work first):
 5. Repeat on charger and with/without an external display.
 6. Force-quit only the UI; confirm the worker exits and normal lid sleep returns.
 7. Inspect `pmset -g` to confirm `SleepDisabled` was not enabled.
+8. Arm Terminal Sessions: open a shell and check the active status; close all terminal shells and check that the status returns to waiting. Repeat with Codex CLI and Claude Code individually.
+9. Select two triggers and verify either one keeps the session active; close both and verify waiting. Verify manual sleep and safety cutoffs disarm watching rather than restarting it.
 
 Report Mac model, macOS version, charger/display setup, and which check failed. Do not include serial numbers or private logs.
 

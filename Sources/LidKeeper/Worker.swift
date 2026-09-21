@@ -4,9 +4,10 @@ import SessionPolicy
 
 // Separate process retains cleanup responsibility if the UI crashes. stdin is a
 // lifetime lease: EOF releases the lid control. No privileged daemon is installed.
-func runWorker(seconds: Double) -> Never {
+func runWorker(seconds: Double, triggers: Set<ActivityTrigger> = []) -> Never {
     let power = PowerControl()
-    let policy = SessionPolicy(deadline: Date().addingTimeInterval(seconds))
+    let watching = !triggers.isEmpty
+    let policy = SessionPolicy(deadline: watching ? .distantFuture : Date().addingTimeInterval(seconds))
     let owner = getppid()
     func emit(_ message: String) { print(message); fflush(stdout) }
     let lockPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("dev.blueraddish.LidKeeper.session.lock")
@@ -38,7 +39,11 @@ func runWorker(seconds: Double) -> Never {
         source.setEventHandler { finish("Session interrupted") }
         source.resume(); signals.append(source)
     }
-    do { try power.start() } catch { emit("ERROR \(error.localizedDescription)"); exit(1) }
+    var triggerSession = TriggerSession()
+    var lastActivity = ""
+    if !watching {
+        do { try power.start() } catch { emit("ERROR \(error.localizedDescription)"); exit(1) }
+    }
     // Read from the pipe on a dedicated thread; execute all state changes on main.
     DispatchQueue.global().async {
         while let line = readLine() {
@@ -56,9 +61,23 @@ func runWorker(seconds: Double) -> Never {
             onBattery: battery.onBattery, thermalCritical: thermal == .serious || thermal == .critical,
             ownerAlive: getppid() == owner && kill(owner, 0) == 0) {
             finish(reason)
+            return
+        }
+        if watching {
+            do {
+                let matches = try ActivityMonitor.matching(triggers)
+                try triggerSession.update(matches: matches, activate: { try power.start() }, deactivate: {
+                    if let error = power.stop() { throw PowerError.message(error) }
+                })
+                let activity = matches.isEmpty ? "WAITING" : "ACTIVE " + matches.map(\.title).joined(separator: ", ")
+                if activity != lastActivity { emit(activity); lastActivity = activity }
+            } catch {
+                emit("ERROR \(error.localizedDescription)")
+                finish("Watching stopped")
+            }
         }
     }
     timer.resume()
-    emit("READY")
+    emit(watching ? "WATCHING" : "READY")
     withExtendedLifetime(signals) { dispatchMain() }
 }

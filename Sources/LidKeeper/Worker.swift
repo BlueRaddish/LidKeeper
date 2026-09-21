@@ -1,0 +1,64 @@
+import Foundation
+import Darwin
+import SessionPolicy
+
+// Separate process retains cleanup responsibility if the UI crashes. stdin is a
+// lifetime lease: EOF releases the lid control. No privileged daemon is installed.
+func runWorker(seconds: Double) -> Never {
+    let power = PowerControl()
+    let policy = SessionPolicy(deadline: Date().addingTimeInterval(seconds))
+    let owner = getppid()
+    func emit(_ message: String) { print(message); fflush(stdout) }
+    let lockPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("dev.blueraddish.LidKeeper.session.lock")
+    let lock = open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
+    guard lock >= 0, flock(lock, LOCK_EX | LOCK_NB) == 0 else {
+        emit("ERROR Another session is active, or its lock is unavailable."); exit(1)
+    }
+    let initial = Battery.read()
+    if let reason = policy.stopReason(now: Date(), batteryPercent: initial.percent,
+                                     onBattery: initial.onBattery, thermalCritical: false, ownerAlive: true) {
+        emit("ERROR \(reason)"); exit(1)
+    }
+    var finishing = false
+    func finish(_ reason: String, sleep: Bool = false) {
+        guard !finishing else { return }; finishing = true
+        if let error = power.stop() {
+            emit("ERROR \(error). Restart your Mac to restore lid behavior.")
+            exit(2)
+        }
+        if sleep {
+            do { try power.sleepNow() } catch { emit("ERROR \(error.localizedDescription)"); exit(2) }
+        }
+        emit("STOPPED \(reason)"); exit(0)
+    }
+    var signals: [DispatchSourceSignal] = []
+    for number in [SIGTERM, SIGINT, SIGHUP] {
+        signal(number, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+        source.setEventHandler { finish("Session interrupted") }
+        source.resume(); signals.append(source)
+    }
+    do { try power.start() } catch { emit("ERROR \(error.localizedDescription)"); exit(1) }
+    // Read from the pipe on a dedicated thread; execute all state changes on main.
+    DispatchQueue.global().async {
+        while let line = readLine() {
+            if line == "sleep" { DispatchQueue.main.async { finish("Sleep requested", sleep: true) }; return }
+            if line == "stop" { DispatchQueue.main.async { finish("Session ended") }; return }
+        }
+        DispatchQueue.main.async { finish("App disconnected") }
+    }
+    let timer = DispatchSource.makeTimerSource(queue: .main)
+    timer.schedule(deadline: .now(), repeating: 2)
+    timer.setEventHandler {
+        let battery = Battery.read()
+        let thermal = ProcessInfo.processInfo.thermalState
+        if let reason = policy.stopReason(now: Date(), batteryPercent: battery.percent,
+            onBattery: battery.onBattery, thermalCritical: thermal == .serious || thermal == .critical,
+            ownerAlive: getppid() == owner && kill(owner, 0) == 0) {
+            finish(reason)
+        }
+    }
+    timer.resume()
+    emit("READY")
+    withExtendedLifetime(signals) { dispatchMain() }
+}

@@ -63,13 +63,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func rebuild() {
         item.button?.image = NSImage(systemSymbolName: active ? "laptopcomputer.and.arrow.down" : "laptopcomputer", accessibilityDescription: "LidKeeper")
-        item.button?.title = active ? " On" : ""
+        item.button?.title = watching ? (active ? " Auto · Awake" : " Auto · Waiting") : (active ? " On" : "")
+        item.button?.toolTip = watching
+            ? (active ? "LidKeeper: trigger mode is on and keeping your Mac awake" : "LidKeeper: trigger mode is on, waiting for a selected activity")
+            : "LidKeeper: trigger mode is off"
         let menu = NSMenu()
         let title = NSMenuItem(title: "LidKeeper · Experimental", action: nil, keyEquivalent: "")
         menu.addItem(title)
         menu.addItem(NSMenuItem(title: status, action: nil, keyEquivalent: ""))
         menu.addItem(.separator())
-        let triggerItem = NSMenuItem(title: "Trigger-Based", action: nil, keyEquivalent: "")
+        let triggerLabel = watching
+            ? "Trigger-Based: On · \(active ? "Keeping Awake" : "Waiting")"
+            : "Trigger-Based: Off"
+        let triggerItem = NSMenuItem(title: triggerLabel, action: nil, keyEquivalent: "")
         triggerItem.state = watching ? .on : .off
         let triggersMenu = NSMenu()
         triggersMenu.autoenablesItems = false

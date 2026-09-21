@@ -29,6 +29,8 @@ Open **Trigger-Based**, check the activities you want to watch, then choose **Wa
 
 The worker checks about every two seconds. It acquires keep-awake controls when any selection matches, releases them when none match, and continues watching. Waiting does not hold a power assertion. The menu shows the matching activities, or “Watching · no selected triggers running.” Watching has no fixed time limit and cannot wake an already sleeping Mac.
 
+The main menu explicitly shows **Trigger-Based: On · Keeping Awake**, **On · Waiting**, or **Off**, with a checkmark while enabled. Without opening the menu, **Auto · Awake** or **Auto · Waiting** in the menu bar tells you trigger mode is on. Waiting means automation is enabled but is not currently preventing sleep.
+
 **Stop Watching**, **End Session**, manual system sleep, quitting, a monitoring error, or a battery/thermal cutoff disarms watching completely. Re-enable it explicitly afterward. To change selections, stop watching first. Selections are remembered, but watching never starts automatically on launch. Timed sessions and watching are mutually exclusive.
 
 Monitoring reads only your account's executable names and terminal assignments, plus running app bundle identifiers. It does not read terminal contents, command arguments, prompts, or project files. No Accessibility or Automation permission is needed. A sandbox or system policy that blocks process inspection will stop watching with an error.

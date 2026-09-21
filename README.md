@@ -17,6 +17,8 @@ open dist/LidKeeper.app
 
 Click the laptop icon in the menu bar and choose a 30-minute, 1-hour, or 2-hour session. The app starts inactive. No login item, privileged helper, or permanent power preference is installed. The local build is ad-hoc signed, not notarized.
 
+Timed options remain visible during a session: a checkmark identifies the active duration, and a dash indicates startup. Click the checked duration or **End Session** to stop. Trigger selections have checkmarks; matching activities also show **Running**. The battery/heat row opens a submenu with checked, clickable explanations of both protections. These cutoffs remain fixed in this version.
+
 ### Trigger-based sessions
 
 Open **Trigger-Based**, check the activities you want to watch, then choose **Watch Selected Triggers**. Multiple selections mean **any selected activity** can keep your Mac awake:

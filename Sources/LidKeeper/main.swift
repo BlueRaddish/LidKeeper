@@ -34,7 +34,7 @@ if CommandLine.arguments.contains("--diagnose") {
     exit(0)
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var item: NSStatusItem!
     private var worker: Process?
     private var input: Pipe?
@@ -44,6 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var buffer = ""
     private var observer: NSObjectProtocol?
     private var watching = false
+    private var timedMinutes: Int?
+    private var matchingTriggers: Set<String> = []
     private var selectedTriggers = Set<ActivityTrigger>(
         (UserDefaults.standard.stringArray(forKey: "selectedTriggers") ?? ["terminal"])
             .compactMap(ActivityTrigger.init(rawValue:)))
@@ -78,7 +80,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         triggersMenu.addItem(enable)
         triggersMenu.addItem(.separator())
         for (index, trigger) in ActivityTrigger.allCases.enumerated() {
-            let choice = NSMenuItem(title: trigger.title, action: #selector(toggleTrigger(_:)), keyEquivalent: "")
+            let label = trigger.title + (matchingTriggers.contains(trigger.title) ? " · Running" : "")
+            let choice = NSMenuItem(title: label, action: #selector(toggleTrigger(_:)), keyEquivalent: "")
             choice.tag = index; choice.target = self
             choice.state = selectedTriggers.contains(trigger) ? .on : .off
             choice.isEnabled = worker == nil
@@ -89,19 +92,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hint.isEnabled = false; triggersMenu.addItem(hint)
         triggerItem.submenu = triggersMenu
         menu.addItem(triggerItem)
-        if worker == nil {
-            for (label, minutes) in [("Keep Awake for 30 Minutes", 30), ("Keep Awake for 1 Hour", 60), ("Keep Awake for 2 Hours", 120)] {
-                let choice = NSMenuItem(title: label, action: #selector(start(_:)), keyEquivalent: "")
-                choice.tag = minutes; choice.target = self; menu.addItem(choice)
-            }
-        } else {
+        for (label, minutes) in [("Keep Awake for 30 Minutes", 30), ("Keep Awake for 1 Hour", 60), ("Keep Awake for 2 Hours", 120)] {
+            let choice = NSMenuItem(title: label, action: #selector(start(_:)), keyEquivalent: "")
+            choice.state = timedMinutes == minutes ? (active ? .on : .mixed) : .off
+            choice.tag = minutes; choice.target = self; menu.addItem(choice)
+        }
+        if worker != nil {
             let stopItem = NSMenuItem(title: "End Session", action: #selector(stop), keyEquivalent: "")
             stopItem.target = self; menu.addItem(stopItem)
         }
         let sleep = NSMenuItem(title: "Sleep Now", action: #selector(sleepNow), keyEquivalent: "s")
         sleep.target = self; menu.addItem(sleep)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Stops at 20% battery or high heat", action: nil, keyEquivalent: ""))
+        let safety = NSMenuItem(title: "Stops at 20% Battery or High Heat", action: nil, keyEquivalent: "")
+        let safetyMenu = NSMenu()
+        for (label, tag) in [("Battery Cutoff: 20%…", 0), ("High Heat Protection…", 1)] {
+            let detail = NSMenuItem(title: label, action: #selector(showSafetyDetails(_:)), keyEquivalent: "")
+            detail.target = self; detail.tag = tag; detail.state = .on
+            safetyMenu.addItem(detail)
+        }
+        safety.submenu = safetyMenu
+        menu.addItem(safety)
         let about = NSMenuItem(title: "About & Limitations…", action: #selector(about), keyEquivalent: "")
         about.target = self; menu.addItem(about)
         let quit = NSMenuItem(title: "Quit LidKeeper", action: #selector(quit), keyEquivalent: "q")
@@ -110,7 +121,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func start(_ sender: NSMenuItem) {
+        if worker != nil && timedMinutes == sender.tag { stop(); return }
         launchWorker(seconds: sender.tag * 60, watch: false)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(start(_:)) {
+            return worker == nil || timedMinutes == menuItem.tag
+        }
+        return true
+    }
+
+    @objc private func showSafetyDetails(_ sender: NSMenuItem) {
+        let alert = NSAlert()
+        if sender.tag == 0 {
+            alert.messageText = "Battery cutoff is enabled"
+            alert.informativeText = "At 20% battery or below, LidKeeper ends the session and restores normal sleep eligibility. This cutoff applies while running on battery, not while charging. Trigger watching stays off until you enable it again. The threshold is fixed at 20% in this version."
+        } else {
+            alert.messageText = "High heat protection is enabled"
+            alert.informativeText = "LidKeeper ends the session when macOS reports serious or critical thermal pressure. This applies on both battery and charger. It uses macOS's thermal status, not a fixed temperature. Trigger watching stays off until you enable it again. This protection is always enabled."
+        }
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     @objc private func toggleTrigger(_ sender: NSMenuItem) {
@@ -155,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self, self.worker === process else { return }
                 self.worker = nil; self.input = nil; self.active = false; self.watching = false
+                self.timedMinutes = nil; self.matchingTriggers = []
                 if self.status == "Starting…" || self.status.hasPrefix("Awake") || self.status.hasPrefix("Watching") {
                     self.status = process.terminationStatus == 0 ? "Session ended" : "Session failed — see diagnostics"
                 }
@@ -168,6 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             commands.fileHandleForReading.closeFile()
             output.fileHandleForWriting.closeFile()
             worker = process; input = commands; watching = watch
+            timedMinutes = watch ? nil : seconds / 60
         } catch { status = error.localizedDescription }
         rebuild()
     }
@@ -178,14 +212,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let line = String(buffer[..<newline]); buffer.removeSubrange(...newline)
             if line == "READY" { active = true; status = "Awake with lid closed · session active" }
             else if line == "WATCHING" || line == "WAITING" {
+                matchingTriggers = []
                 active = false; status = "Watching · no selected triggers running"
             }
             else if line.hasPrefix("ACTIVE ") {
+                matchingTriggers = Set(String(line.dropFirst(7)).components(separatedBy: ", "))
                 active = true; status = "Awake · " + String(line.dropFirst(7))
             }
-            else if line.hasPrefix("STOPPED ") { active = false; status = String(line.dropFirst(8)) }
+            else if line.hasPrefix("STOPPED ") { active = false; timedMinutes = nil; matchingTriggers = []; status = String(line.dropFirst(8)) }
             else if line.hasPrefix("ERROR ") {
                 active = false; status = "Could not complete session"
+                timedMinutes = nil; matchingTriggers = []
                 let alert = NSAlert(); alert.messageText = "LidKeeper"
                 alert.informativeText = String(line.dropFirst(6)); alert.runModal()
             }

@@ -71,6 +71,8 @@ Apple source references:
 
 ## Development and validation
 
+The 0.2.3 maintenance pass checks thermal pressure before activation, reports monitoring failures with a nonzero exit status, and drains worker messages before processing worker exit. Complete lines are decoded together so split UTF-8 characters survive pipe reads. Power-control cleanup errors remain visible and prevent reacquisition. Terminal-only watching skips desktop-app enumeration; polling allows 100 ms of timer coalescing.
+
 ```sh
 swift run PolicyChecks
 bash scripts/build.sh

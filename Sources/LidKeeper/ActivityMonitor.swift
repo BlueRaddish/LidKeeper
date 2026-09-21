@@ -3,7 +3,8 @@ import SessionPolicy
 
 enum ActivityMonitor {
     static func matching(_ selected: Set<ActivityTrigger>) throws -> [ActivityTrigger] {
-        let bundles = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        let bundles: Set<String> = selected.contains(where: { !$0.needsProcesses })
+            ? Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier)) : []
         var processes: [TerminalProcess] = []
         if selected.contains(where: \.needsProcesses) {
             processes = TerminalProcess.parse(try processSnapshot())
@@ -14,7 +15,7 @@ enum ActivityMonitor {
     private static func processSnapshot() throws -> String {
         let process = Process(), pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-U", String(getuid()), "-ww", "-o", "tty=,comm="]
+        process.arguments = ["-U", String(getuid()), "-x", "-ww", "-o", "tty=,comm="]
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         let output = SnapshotOutput()

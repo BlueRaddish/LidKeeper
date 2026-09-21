@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var status = "Normal lid sleep"
     private var active = false
     private var quitting = false
-    private var buffer = ""
+    private var messages = WorkerMessages()
     private var observer: NSObjectProtocol?
     private var watching = false
     private var timedMinutes: Int?
@@ -179,28 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         process.executableURL = Bundle.main.executableURL
         process.arguments = watch ? ["--watch", selectedTriggers.map(\.rawValue).sorted().joined(separator: ",")] : ["--worker", String(seconds)]
         process.standardInput = commands; process.standardOutput = output; process.standardError = output
-        buffer = ""; status = "Starting…"
-        output.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
-            let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil; return }
-            let text = String(decoding: data, as: UTF8.self)
-            DispatchQueue.main.async {
-                guard let self, let process, self.worker === process else { return }
-                self.receive(text)
-            }
-        }
-        process.terminationHandler = { [weak self] process in
-            DispatchQueue.main.async {
-                guard let self, self.worker === process else { return }
-                self.worker = nil; self.input = nil; self.active = false; self.watching = false
-                self.timedMinutes = nil; self.matchingTriggers = []
-                if self.status == "Starting…" || self.status.hasPrefix("Awake") || self.status.hasPrefix("Watching") {
-                    self.status = process.terminationStatus == 0 ? "Session ended" : "Session failed — see diagnostics"
-                }
-                self.rebuild()
-                if self.quitting { NSApp.reply(toApplicationShouldTerminate: true) }
-            }
-        }
+        messages = WorkerMessages(); status = "Starting…"
         do {
             try process.run()
             // Close the parent's copy of the child's stdin read end.
@@ -208,14 +187,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             output.fileHandleForWriting.closeFile()
             worker = process; input = commands; watching = watch
             timedMinutes = watch ? nil : seconds / 60
+            // One reader queues messages, then completion, in order. A separate
+            // termination callback could discard the final ERROR/STOPPED line.
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                do {
+                    while let data = try output.fileHandleForReading.read(upToCount: 4096), !data.isEmpty {
+                        DispatchQueue.main.async {
+                            guard let self, self.worker === process else { return }
+                            self.receive(data)
+                        }
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        guard let self, self.worker === process else { return }
+                        self.status = "Worker connection failed"
+                        self.input?.fileHandleForWriting.closeFile()
+                    }
+                }
+                output.fileHandleForReading.closeFile()
+                process.waitUntilExit()
+                DispatchQueue.main.async { self?.workerFinished(process) }
+            }
         } catch { status = error.localizedDescription }
         rebuild()
     }
 
-    private func receive(_ text: String) {
-        buffer += text
-        while let newline = buffer.firstIndex(of: "\n") {
-            let line = String(buffer[..<newline]); buffer.removeSubrange(...newline)
+    private func workerFinished(_ process: Process) {
+        guard worker === process else { return }
+        worker = nil; input = nil; active = false; watching = false
+        timedMinutes = nil; matchingTriggers = []
+        if status == "Starting…" || status.hasPrefix("Awake") || status.hasPrefix("Watching") {
+            status = process.terminationStatus == 0 ? "Session ended" : "Session failed — see diagnostics"
+        }
+        rebuild()
+        if quitting { NSApp.reply(toApplicationShouldTerminate: true) }
+    }
+
+    private func receive(_ data: Data) {
+        for line in messages.append(data) {
             if line == "READY" { active = true; status = "Awake with lid closed · session active" }
             else if line == "WATCHING" || line == "WAITING" {
                 matchingTriggers = []
@@ -238,7 +247,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func command(_ value: String) {
         do { try input?.fileHandleForWriting.write(contentsOf: Data("\(value)\n".utf8)) }
-        catch { status = "Worker disconnected"; rebuild() }
+        catch {
+            input?.fileHandleForWriting.closeFile()
+            status = "Worker disconnected"; rebuild()
+        }
     }
     @objc private func stop() { command("stop") }
     @objc private func sleepNow() {

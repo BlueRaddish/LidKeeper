@@ -71,5 +71,14 @@ do {
     try denied.update(matches: [.terminal], activate: { throw TestError.denied }, deactivate: {})
     cases.append(("Activation failure propagates", false))
 } catch { cases.append(("Activation failure never reports active", !denied.active)) }
+var messages = WorkerMessages()
+cases.append(("Partial worker line waits for newline", messages.append(Data("ACT".utf8)).isEmpty))
+cases.append(("Worker messages preserve order across chunks", messages.append(Data("IVE Terminal Sessions\nSTOPPED Session ended\n".utf8)) == ["ACTIVE Terminal Sessions", "STOPPED Session ended"]))
+let unicodeMessage = Array("ERROR Too warm…\n".utf8)
+var decoded: [String] = []
+for byte in unicodeMessage { decoded += messages.append(Data([byte])) }
+cases.append(("Split UTF-8 is decoded without corruption", decoded == ["ERROR Too warm…"]))
+_ = messages.append(Data(repeating: 65, count: 65_537))
+cases.append(("Oversized partial output cannot grow indefinitely", messages.append(Data("READY\n".utf8)) == ["READY"]))
 for (name, passed) in cases { print("\(passed ? "PASS" : "FAIL") \(name)") }
 exit(cases.allSatisfy { $0.1 } ? 0 : 1)

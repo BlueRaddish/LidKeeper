@@ -42,6 +42,9 @@ final class PowerControl {
     }
 
     func start() throws {
+        guard connection == 0 && !hasAssertion && !changedLid else {
+            throw PowerError.message("Power controls are already held or still need cleanup.")
+        }
         guard Self.property("AppleClamshellState") != nil else {
             throw PowerError.message("No laptop lid was detected.")
         }
@@ -78,7 +81,11 @@ final class PowerControl {
             do { try setLidDisabled(false); changedLid = false }
             catch let failure { error = failure.localizedDescription }
         }
-        if hasAssertion { IOPMAssertionRelease(assertion); hasAssertion = false }
+        if hasAssertion {
+            let result = IOPMAssertionRelease(assertion)
+            if result == kIOReturnSuccess { hasAssertion = false }
+            else { error = error ?? failure("Release idle sleep assertion", result).localizedDescription }
+        }
         if !changedLid && connection != 0 { IOServiceClose(connection); connection = 0 }
         return error
     }

@@ -29,10 +29,9 @@ struct Battery {
 }
 
 final class PowerControl {
-    private var connection: io_connect_t = 0
     private var assertion: IOPMAssertionID = 0
     private var hasAssertion = false
-    private var changedLid = false
+    private var ownsOverride = false
 
     static func property(_ name: String) -> Bool? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
@@ -41,53 +40,66 @@ final class PowerControl {
         return IORegistryEntryCreateCFProperty(service, name as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool
     }
 
+    static func confirmsSleepDisabled(_ disabled: Bool) -> Bool {
+        for attempt in 0..<5 {
+            if property("SleepDisabled") == disabled { return true }
+            if attempt < 4 { Thread.sleep(forTimeInterval: 0.1) }
+        }
+        return false
+    }
+
     func start() throws {
-        guard connection == 0 && !hasAssertion && !changedLid else {
-            throw PowerError.message("Power controls are already held or still need cleanup.")
-        }
-        guard Self.property("AppleClamshellState") != nil else {
-            throw PowerError.message("No laptop lid was detected.")
-        }
+        guard !hasAssertion && !ownsOverride else { throw PowerError.message("Power controls are already held or still need cleanup.") }
+        guard Self.property("AppleClamshellState") != nil else { throw PowerError.message("No laptop lid was detected.") }
         guard Self.property("SleepDisabled") == false else {
-            throw PowerError.message("System sleep is disabled or its state is unavailable. If you previously used pmset, restore it with: sudo pmset -a disablesleep 0")
+            throw PowerError.message("System sleep is already disabled or its state is unavailable. LidKeeper will not take over another utility's setting.")
         }
-        connection = IOPMFindPowerManagement(0)
-        guard connection != 0 else { throw PowerError.message("Cannot connect to macOS power management.") }
+        try SleepBan.ensureReady()
+        let result = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn), "LidKeeper session" as CFString, &assertion)
+        guard result == kIOReturnSuccess else { throw failure("Prevent idle sleep", result) }
+        hasAssertion = true
         do {
-            let result = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
-                IOPMAssertionLevel(kIOPMAssertionLevelOn), "LidKeeper session" as CFString, &assertion)
-            guard result == kIOReturnSuccess else { throw failure("Prevent idle sleep", result) }
-            hasAssertion = true
-            try setLidDisabled(true)
-            changedLid = true
+            try SleepBan.writeLease()
+            try SleepBan.setDisabled(true)
+            ownsOverride = true
+            guard Self.confirmsSleepDisabled(true) else {
+                throw PowerError.message("macOS did not confirm that sleep was disabled.")
+            }
         } catch {
-            _ = stop()
-            throw error
+            let original = error
+            if let cleanup = stop() { throw PowerError.message("\(original.localizedDescription) Cleanup failed: \(cleanup)") }
+            throw original
         }
     }
 
-    // Private selector 12 is kPMSetClamshellSleepState in Apple's IOPMLibDefs.h.
-    // Unlike SleepDisabled, this only changes the kernel's clamshell sleep mask.
-    // It shares the powerd bit: this is experimental, not an independently owned assertion.
-    private func setLidDisabled(_ disabled: Bool) throws {
-        var input: UInt64 = disabled ? 1 : 0
-        let result = IOConnectCallScalarMethod(connection, 12, &input, 1, nil, nil)
-        guard result == kIOReturnSuccess else { throw failure("Change lid sleep", result) }
+    func renewLease() throws {
+        guard ownsOverride else { return }
+        guard Self.property("SleepDisabled") == true else {
+            throw PowerError.message("macOS no longer reports sleep disabled; the session cannot be trusted.")
+        }
+        try SleepBan.writeLease()
     }
 
     @discardableResult func stop() -> String? {
-        var error: String?
-        if changedLid {
-            do { try setLidDisabled(false); changedLid = false }
-            catch let failure { error = failure.localizedDescription }
+        var errors: [String] = []
+        // A failed enable can still have taken effect, so a lease also means cleanup is owed.
+        if ownsOverride || SleepBan.hasLease {
+            do {
+                try SleepBan.setDisabled(false)
+                guard Self.confirmsSleepDisabled(false) else {
+                    throw PowerError.message("macOS did not confirm normal sleep was restored.")
+                }
+                ownsOverride = false
+                try SleepBan.removeLease()
+            } catch { errors.append(error.localizedDescription) }
         }
         if hasAssertion {
             let result = IOPMAssertionRelease(assertion)
             if result == kIOReturnSuccess { hasAssertion = false }
-            else { error = error ?? failure("Release idle sleep assertion", result).localizedDescription }
+            else { errors.append(failure("Release idle sleep assertion", result).localizedDescription) }
         }
-        if !changedLid && connection != 0 { IOServiceClose(connection); connection = 0 }
-        return error
+        return errors.isEmpty ? nil : errors.joined(separator: " ")
     }
 
     func sleepNow() throws {
@@ -100,7 +112,7 @@ final class PowerControl {
     }
 
     private func failure(_ operation: String, _ code: IOReturn) -> PowerError {
-        .message("\(operation) failed (\(String(format: "0x%08x", code))). This macOS version may not support the experimental lid control.")
+        .message("\(operation) failed (\(String(format: "0x%08x", code))).")
     }
 
     deinit { stop() }

@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""Opt-in physical-Mac API smoke test. Keep the lid OPEN throughout.
+"""Opt-in power-control smoke test. Keep the lid OPEN throughout.
 
-Temporarily suppresses lid sleep. Does not request system sleep. Run after build.
+Requires LidKeeper's one-time administrator setup via the app. Never requests sleep.
 """
 import selectors
 import subprocess
 from pathlib import Path
 
-binary = Path(__file__).resolve().parents[1] / ".build/release/LidKeeper"
+binary = Path(__file__).resolve().parents[1] / "dist/LidKeeper.app/Contents/MacOS/LidKeeper"
+
+
+def diagnosis():
+    return subprocess.check_output([str(binary), "--diagnose"], text=True)
+
+
+initial = diagnosis()
+assert "Lid present: true" in initial, initial
+assert "Global sleep disabled: Optional(false)" in initial, initial
+assert "Limited administrator rule installed: true" in initial, (
+    "Open the app and complete its one-time administrator setup first.\n" + initial
+)
 
 
 def check(mode):
@@ -22,6 +34,7 @@ def check(mode):
             assert selector.select(timeout=10), "No worker response"
         first = process.stdout.readline().strip()
         assert first == "READY", first
+        assert "Global sleep disabled: Optional(true)" in diagnosis()
         if mode == "exclusive":
             other = subprocess.run([str(binary), "--worker", "2"], input="", text=True,
                                    capture_output=True, timeout=5)
@@ -38,6 +51,7 @@ def check(mode):
         remainder = process.stdout.read().strip()
         assert process.returncode == 0, remainder
         assert "STOPPED " in remainder, remainder
+        assert "Global sleep disabled: Optional(false)" in diagnosis()
         print(f"PASS {mode}: {remainder}")
     finally:
         if process.poll() is None:

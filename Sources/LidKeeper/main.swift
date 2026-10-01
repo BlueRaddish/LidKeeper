@@ -5,6 +5,8 @@ import SessionPolicy
 // Broken worker pipes should surface as write errors, not terminate the UI.
 signal(SIGPIPE, SIG_IGN)
 
+if CommandLine.arguments.contains("--reconcile") { exit(SleepBan.reconcile() ? 0 : 1) }
+
 if CommandLine.arguments.contains("--watch") {
     let values = CommandLine.arguments.last?.split(separator: ",").map(String.init) ?? []
     let triggers = Set(values.compactMap(ActivityTrigger.init(rawValue:)))
@@ -30,6 +32,8 @@ if CommandLine.arguments.contains("--diagnose") {
     let battery = Battery.read()
     print("Lid present: \(PowerControl.property("AppleClamshellState") != nil)")
     print("Global sleep disabled: \(String(describing: PowerControl.property("SleepDisabled")))")
+    print("Limited administrator rule installed: \(SleepBan.grantInstalled)")
+    print("Recovery lease exists: \(SleepBan.hasLease)")
     print("Battery: \(battery.percent.map(String.init) ?? "unknown")%; on battery: \(battery.onBattery)")
     exit(0)
 }
@@ -68,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             ? (active ? "LidKeeper: trigger mode is on and keeping your Mac awake" : "LidKeeper: trigger mode is on, waiting for a selected activity")
             : "LidKeeper: trigger mode is off"
         let menu = NSMenu()
-        let title = NSMenuItem(title: "LidKeeper · Experimental", action: nil, keyEquivalent: "")
+        let title = NSMenuItem(title: "LidKeeper", action: nil, keyEquivalent: "")
         menu.addItem(title)
         menu.addItem(NSMenuItem(title: status, action: nil, keyEquivalent: ""))
         menu.addItem(.separator())
@@ -167,13 +171,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func launchWorker(seconds: Int, watch: Bool) {
         guard worker == nil else { return }
-        if !UserDefaults.standard.bool(forKey: "acknowledgedExperimentalControl") {
+        if !SleepBan.grantInstalled {
             let alert = NSAlert()
-            alert.messageText = "Keep working with the lid closed"
-            alert.informativeText = "LidKeeper uses a private macOS lid control. Explicit sleep remains available by design, but lid and power-button behavior need testing on your Mac. Keep your Mac ventilated while closed. Sessions stop at 20% battery or high heat. Timed sessions expire; trigger-based sessions watch until you stop them or request sleep."
-            alert.addButton(withTitle: "Start Session"); alert.addButton(withTitle: "Cancel")
+            alert.messageText = "Allow LidKeeper to control system sleep?"
+            alert.informativeText = "Closed-lid sleep requires macOS's global sleep override, including on battery. While a session is active, Apple-menu and physical power-button sleep may also be blocked. LidKeeper will install a limited administrator rule for only two pmset commands, restore normal sleep when the session ends, and run a crash-recovery watchdog. Use LidKeeper's Sleep Now to restore normal sleep before sleeping."
+            alert.addButton(withTitle: "Set Up & Continue"); alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
-            UserDefaults.standard.set(true, forKey: "acknowledgedExperimentalControl")
+            do { try SleepBan.installGrant() }
+            catch {
+                let failure = NSAlert(); failure.messageText = "LidKeeper setup failed"
+                failure.informativeText = error.localizedDescription; failure.runModal()
+                return
+            }
         }
         let process = Process(), commands = Pipe(), output = Pipe()
         process.executableURL = Bundle.main.executableURL

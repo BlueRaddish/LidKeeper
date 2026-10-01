@@ -3,7 +3,7 @@ import Darwin
 import SessionPolicy
 
 // Separate process retains cleanup responsibility if the UI crashes. stdin is a
-// lifetime lease: EOF releases the lid control. No privileged daemon is installed.
+// lifetime lease; a LaunchAgent also repairs a stranded global override.
 func runWorker(seconds: Double, triggers: Set<ActivityTrigger> = []) -> Never {
     let power = PowerControl()
     let watching = !triggers.isEmpty
@@ -27,7 +27,7 @@ func runWorker(seconds: Double, triggers: Set<ActivityTrigger> = []) -> Never {
     func finish(_ reason: String, sleep: Bool = false, exitCode: Int32 = 0) {
         guard !finishing else { return }; finishing = true
         if let error = power.stop() {
-            emit("ERROR \(error). Restart your Mac to restore lid behavior.")
+            emit("ERROR \(error). To restore normal sleep, run: sudo pmset -a disablesleep 0")
             exit(2)
         }
         if sleep {
@@ -64,6 +64,11 @@ func runWorker(seconds: Double, triggers: Set<ActivityTrigger> = []) -> Never {
             onBattery: battery.onBattery, thermalCritical: thermal == .serious || thermal == .critical,
             ownerAlive: getppid() == owner && kill(owner, 0) == 0) {
             finish(reason)
+            return
+        }
+        do { try power.renewLease() } catch {
+            emit("ERROR \(error.localizedDescription)")
+            finish("Power state changed", exitCode: 1)
             return
         }
         if watching {

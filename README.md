@@ -58,6 +58,10 @@ The policy checks cover time, battery, thermal pressure, process matching, and w
 
 Physical validation remains required on the target Mac: while unplugged, start a session and confirm `--diagnose` reports `Global sleep disabled: Optional(true)`; close the lid and confirm a running job continues; reopen it, end the session, and confirm `Optional(false)`. Repeat with each desired trigger and on charger. Verify battery/thermal cutoffs and crash recovery separately. Power-button behavior must be tested separately because hardware and Touch ID semantics vary.
 
+For a repeatable lid test, start a LidKeeper session and then run `python3 scripts/lid_probe.py --seconds 90` from the repository. Close the lid for at least 30 seconds and reopen it. The probe records one-second heartbeats, the actual clamshell sensor state and `SleepDisabled`, then checks macOS's sleep log. It reports a pass only if it observed at least 25 closed-lid samples without a heartbeat gap, sleep event or lost override. It writes a CSV under `~/Library/Logs/LidKeeper/` and does not change power settings. `--baseline --seconds 3` checks the probe with LidKeeper inactive.
+
+A VM can exercise software paths, but it cannot establish that a real MacBook stays awake when its physical lid closes. Apple's macOS guest path in [Virtualization](https://developer.apple.com/documentation/virtualization/virtualize-macos-on-a-mac) is for Apple silicon; virtual hardware may also lack the battery and lid sensors this app requires. Use the physical probe for the remaining release gate.
+
 ## License
 
 MIT.

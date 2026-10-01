@@ -43,21 +43,13 @@ func runWorker(seconds: Double, triggers: Set<ActivityTrigger> = []) -> Never {
         source.resume(); signals.append(source)
     }
     var triggerSession = TriggerSession()
+    var selectedTriggers = triggers
     var lastActivity = ""
+    var processScanCooldown = 0
     if !watching {
         do { try power.start() } catch { emit("ERROR \(error.localizedDescription)"); exit(1) }
     }
-    // Read from the pipe on a dedicated thread; execute all state changes on main.
-    DispatchQueue.global().async {
-        while let line = readLine() {
-            if line == "sleep" { DispatchQueue.main.async { finish("Sleep requested", sleep: true) }; return }
-            if line == "stop" { DispatchQueue.main.async { finish("Session ended") }; return }
-        }
-        DispatchQueue.main.async { finish("App disconnected") }
-    }
-    let timer = DispatchSource.makeTimerSource(queue: .main)
-    timer.schedule(deadline: .now(), repeating: 2, leeway: .milliseconds(100))
-    timer.setEventHandler {
+    func tick(forceScan: Bool = false) {
         let battery = Battery.read()
         let thermal = ProcessInfo.processInfo.thermalState
         if let reason = policy.stopReason(now: Date(), batteryPercent: battery.percent,
@@ -72,8 +64,14 @@ func runWorker(seconds: Double, triggers: Set<ActivityTrigger> = []) -> Never {
             return
         }
         if watching {
+            let processScan = selectedTriggers.contains(where: \.needsProcesses)
+            if processScan && !forceScan && processScanCooldown > 0 {
+                processScanCooldown -= 1
+                return
+            }
+            processScanCooldown = processScan ? 1 : 0
             do {
-                let matches = try ActivityMonitor.matching(triggers)
+                let matches = try ActivityMonitor.matching(selectedTriggers)
                 try triggerSession.update(matches: matches, activate: { try power.start() }, deactivate: {
                     if let error = power.stop() { throw PowerError.message(error) }
                 })
@@ -85,6 +83,29 @@ func runWorker(seconds: Double, triggers: Set<ActivityTrigger> = []) -> Never {
             }
         }
     }
+    // Read from the pipe on a dedicated thread; execute all state changes on main.
+    DispatchQueue.global().async {
+        while let line = readLine() {
+            if line == "sleep" { DispatchQueue.main.async { finish("Sleep requested", sleep: true) }; return }
+            if line == "stop" { DispatchQueue.main.async { finish("Session ended") }; return }
+            if watching && line.hasPrefix("triggers ") {
+                let value = String(line.dropFirst(9))
+                guard let selection = ActivityTrigger.parseSelection(value) else {
+                    DispatchQueue.main.async { emit("ERROR Invalid trigger selection"); finish("Watching stopped", exitCode: 1) }
+                    return
+                }
+                DispatchQueue.main.async {
+                    selectedTriggers = selection
+                    tick(forceScan: true)
+                }
+                continue
+            }
+        }
+        DispatchQueue.main.async { finish("App disconnected") }
+    }
+    let timer = DispatchSource.makeTimerSource(queue: .main)
+    timer.schedule(deadline: .now(), repeating: 2, leeway: .milliseconds(100))
+    timer.setEventHandler { tick() }
     timer.resume()
     emit(watching ? "WATCHING" : "READY")
     withExtendedLifetime(signals) { dispatchMain() }

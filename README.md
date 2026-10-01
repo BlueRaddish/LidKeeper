@@ -2,7 +2,7 @@
 
 A macOS menu-bar app that keeps a MacBook awake with its lid closed, including on battery, for a timed session or while selected developer activity is running. macOS 13+; Swift 5.9+; no package dependencies.
 
-**Version 0.3 is awaiting physical lid-closure validation.** The previous private clamshell selector accepted calls on this Mac but did not reliably prevent closed-lid sleep. LidKeeper now uses macOS's global `pmset -a disablesleep 1` override, the mechanism used by comparable open-source utilities. It confirms `SleepDisabled` before reporting a session active.
+**Version 0.3.1 is awaiting physical lid-closure validation.** The previous private clamshell selector accepted calls on this Mac but did not reliably prevent closed-lid sleep. LidKeeper now uses macOS's global `pmset -a disablesleep 1` override, the mechanism used by comparable open-source utilities. It confirms `SleepDisabled` before reporting a session active.
 
 ## Install and use
 
@@ -13,7 +13,7 @@ bash scripts/build.sh
 open dist/LidKeeper.app
 ```
 
-Choose a 30-minute, 1-hour, or 2-hour session, or open **Trigger-Based**, select activities, and choose **Watch Selected Triggers**. The app starts inactive. It asks for administrator authentication once to install a narrow sudoers rule allowing only `pmset -a disablesleep 0` and `pmset -a disablesleep 1`. It also installs a per-user LaunchAgent to restore normal sleep after a crashed worker. No administrator password is stored by LidKeeper. The local build is ad-hoc signed, not notarized.
+Choose a 30-minute, 1-hour, or 2-hour session, or open **Trigger-Based** and click an activity. Selecting a trigger starts watching immediately; adding or removing one while watching updates the same session. Removing the last selection ends watching. **Stop Watching** keeps your selections for later; click any saved choice or **Resume Saved Triggers** to resume. The app starts inactive. It asks for administrator authentication once to install a narrow sudoers rule allowing only `pmset -a disablesleep 0` and `pmset -a disablesleep 1`. It also installs a per-user LaunchAgent to restore normal sleep after a crashed worker. No administrator password is stored by LidKeeper. The local build is ad-hoc signed, not notarized.
 
 The menu shows a checkmark beside the active duration and beside Trigger-Based while watching. The menu bar reads **Auto · Awake** or **Auto · Waiting** in trigger mode. **Waiting** means no selected activity is running and the sleep override is off. Trigger watching does not wake an already sleeping Mac and does not start automatically at login.
 
@@ -23,7 +23,9 @@ Trigger choices match if **any** selected activity runs:
 - **Codex CLI / Claude Code:** an executable named `codex` or `claude` attached to a terminal. This detects a running CLI, not whether it is currently generating a response.
 - **Codex App / Claude Desktop / VS Code / Cursor:** a running desktop app, even with no open windows.
 
-Monitoring checks about every two seconds. It reads executable names, terminal assignments, and app bundle identifiers; it does not read command arguments or terminal contents. To change trigger selections, stop watching first. Timed and trigger-based sessions are mutually exclusive. Monitoring errors, an app exit, manual sleep, or a safety cutoff disarm watching.
+Desktop-app triggers are checked about every two seconds; Terminal/Codex/Claude CLI triggers are checked about every four seconds. Battery, heat, and worker health are still checked every two seconds. Monitoring reads executable names, terminal assignments, and app bundle identifiers; it does not read command arguments or terminal contents. Timed and trigger-based sessions are mutually exclusive. Monitoring errors, an app exit, manual sleep, or a safety cutoff disarm watching.
+
+On an Intel MacBookPro16,1, a waiting CLI worker rose from 3.5 to 4.6 MB resident memory over a 90-second sample and used 0.13 CPU seconds. An active Codex CLI worker reached 4.7 MB and used 0.05 CPU seconds in a 24-second sample. A separate process scan cost about 35 ms of CPU per call, or roughly 0.9% of one core at the four-second interval. A desktop-only watcher used about 3.8 MB and 0.02 CPU seconds in 21 seconds. These are short local measurements, not a battery-life estimate or proof of long-term memory stability.
 
 Sessions end at the deadline, at or below 20% battery while unplugged, on serious/critical thermal pressure, on missing battery data while unplugged, or when the app exits. The safety row in the menu opens clickable explanations. Keep the closed Mac ventilated; do not put an active Mac in a bag.
 

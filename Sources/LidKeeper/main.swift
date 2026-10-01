@@ -8,9 +8,8 @@ signal(SIGPIPE, SIG_IGN)
 if CommandLine.arguments.contains("--reconcile") { exit(SleepBan.reconcile() ? 0 : 1) }
 
 if CommandLine.arguments.contains("--watch") {
-    let values = CommandLine.arguments.last?.split(separator: ",").map(String.init) ?? []
-    let triggers = Set(values.compactMap(ActivityTrigger.init(rawValue:)))
-    guard !triggers.isEmpty, triggers.count == Set(values).count else { exit(64) }
+    guard let value = CommandLine.arguments.last,
+          let triggers = ActivityTrigger.parseSelection(value) else { exit(64) }
     runWorker(seconds: 0, triggers: triggers)
 }
 
@@ -51,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var timedMinutes: Int?
     private var matchingTriggers: Set<String> = []
     private var selectedTriggers = Set<ActivityTrigger>(
-        (UserDefaults.standard.stringArray(forKey: "selectedTriggers") ?? ["terminal"])
+        (UserDefaults.standard.stringArray(forKey: "selectedTriggers") ?? [])
             .compactMap(ActivityTrigger.init(rawValue:)))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -83,22 +82,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         triggerItem.state = watching ? .on : .off
         let triggersMenu = NSMenu()
         triggersMenu.autoenablesItems = false
-        let enable = NSMenuItem(title: watching ? "Stop Watching" : "Watch Selected Triggers", action: #selector(toggleWatching), keyEquivalent: "")
-        enable.target = self
-        enable.isEnabled = watching || (worker == nil && !selectedTriggers.isEmpty)
-        enable.state = watching ? .on : .off
-        triggersMenu.addItem(enable)
-        triggersMenu.addItem(.separator())
+        if watching || !selectedTriggers.isEmpty {
+            let enable = NSMenuItem(title: watching ? "Stop Watching" : "Resume Saved Triggers", action: #selector(toggleWatching), keyEquivalent: "")
+            enable.target = self
+            enable.isEnabled = watching || worker == nil
+            enable.state = watching ? .on : .off
+            triggersMenu.addItem(enable)
+            triggersMenu.addItem(.separator())
+        }
         for (index, trigger) in ActivityTrigger.allCases.enumerated() {
             let label = trigger.title + (matchingTriggers.contains(trigger.title) ? " · Running" : "")
             let choice = NSMenuItem(title: label, action: #selector(toggleTrigger(_:)), keyEquivalent: "")
             choice.tag = index; choice.target = self
             choice.state = selectedTriggers.contains(trigger) ? .on : .off
-            choice.isEnabled = worker == nil
+            choice.isEnabled = worker == nil || watching
             triggersMenu.addItem(choice)
         }
         triggersMenu.addItem(.separator())
-        let hint = NSMenuItem(title: "Keeps awake while ANY selection runs", action: nil, keyEquivalent: "")
+        let hint = NSMenuItem(title: "Selecting starts watching · ANY match keeps awake", action: nil, keyEquivalent: "")
         hint.isEnabled = false; triggersMenu.addItem(hint)
         triggerItem.submenu = triggersMenu
         menu.addItem(triggerItem)
@@ -156,11 +157,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc private func toggleTrigger(_ sender: NSMenuItem) {
-        guard worker == nil else { return }
+        guard worker == nil || watching else { return }
         let trigger = ActivityTrigger.allCases[sender.tag]
-        if selectedTriggers.contains(trigger) { selectedTriggers.remove(trigger) }
+        if worker == nil {
+            let added = selectedTriggers.insert(trigger).inserted
+            if added { UserDefaults.standard.set(selectedTriggers.map(\.rawValue).sorted(), forKey: "selectedTriggers") }
+            if !launchWorker(seconds: 0, watch: true) && added {
+                selectedTriggers.remove(trigger)
+                UserDefaults.standard.set(selectedTriggers.map(\.rawValue).sorted(), forKey: "selectedTriggers")
+            }
+            rebuild()
+            return
+        }
+        let wasSelected = selectedTriggers.contains(trigger)
+        if wasSelected { selectedTriggers.remove(trigger) }
         else { selectedTriggers.insert(trigger) }
         UserDefaults.standard.set(selectedTriggers.map(\.rawValue).sorted(), forKey: "selectedTriggers")
+        if selectedTriggers.isEmpty { stop() }
+        else { command("triggers " + selectedTriggers.map(\.rawValue).sorted().joined(separator: ",")) }
         rebuild()
     }
 
@@ -169,19 +183,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         else if !selectedTriggers.isEmpty { launchWorker(seconds: 0, watch: true) }
     }
 
-    private func launchWorker(seconds: Int, watch: Bool) {
-        guard worker == nil else { return }
+    @discardableResult private func launchWorker(seconds: Int, watch: Bool) -> Bool {
+        guard worker == nil else { return false }
         if !SleepBan.grantInstalled {
             let alert = NSAlert()
             alert.messageText = "Allow LidKeeper to control system sleep?"
             alert.informativeText = "Closed-lid sleep requires macOS's global sleep override, including on battery. While a session is active, Apple-menu and physical power-button sleep may also be blocked. LidKeeper will install a limited administrator rule for only two pmset commands, restore normal sleep when the session ends, and run a crash-recovery watchdog. Use LidKeeper's Sleep Now to restore normal sleep before sleeping."
             alert.addButton(withTitle: "Set Up & Continue"); alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
             do { try SleepBan.installGrant() }
             catch {
                 let failure = NSAlert(); failure.messageText = "LidKeeper setup failed"
                 failure.informativeText = error.localizedDescription; failure.runModal()
-                return
+                return false
             }
         }
         let process = Process(), commands = Pipe(), output = Pipe()
@@ -219,6 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         } catch { status = error.localizedDescription }
         rebuild()
+        return worker != nil
     }
 
     private func workerFinished(_ process: Process) {

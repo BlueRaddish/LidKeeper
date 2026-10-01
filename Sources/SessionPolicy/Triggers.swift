@@ -3,6 +3,14 @@ import Foundation
 public enum ActivityTrigger: String, CaseIterable {
     case terminal, codexCLI, claudeCLI, codexApp, claudeApp, vscode, cursor
 
+    public static func parseSelection(_ value: String) -> Set<ActivityTrigger>? {
+        let names = value.split(separator: ",", omittingEmptySubsequences: false)
+        let triggers = names.compactMap { ActivityTrigger(rawValue: String($0)) }
+        guard !triggers.isEmpty, triggers.count == names.count,
+              Set(triggers).count == names.count else { return nil }
+        return Set(triggers)
+    }
+
     public var title: String {
         switch self {
         case .terminal: return "Terminal Sessions"

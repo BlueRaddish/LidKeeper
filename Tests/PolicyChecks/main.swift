@@ -41,6 +41,9 @@ var cases: [(String, Bool)] = [
     ("Claude desktop detected", ActivityTrigger.claudeApp.matches(processes: [], bundles: ["com.anthropic.claudefordesktop"])),
     ("VS Code detected", ActivityTrigger.vscode.matches(processes: [], bundles: ["com.microsoft.VSCode"])),
     ("Cursor detected", ActivityTrigger.cursor.matches(processes: [], bundles: ["com.todesktop.230313mzl4w4u92"])),
+    ("Trigger selection protocol accepts multiple choices", ActivityTrigger.parseSelection("terminal,claudeCLI") == [.terminal, .claudeCLI]),
+    ("Trigger selection protocol rejects duplicates", ActivityTrigger.parseSelection("terminal,terminal") == nil),
+    ("Trigger selection protocol rejects empty or unknown choices", ActivityTrigger.parseSelection("terminal,") == nil && ActivityTrigger.parseSelection("unknown") == nil),
     ("Malformed rows ignored", TerminalProcess.parse("\ninvalid\n").isEmpty)
 ]
 cases.append(("Revoked terminal does not count", !ActivityTrigger.terminal.matches(processes: TerminalProcess.parse("ttys001- /bin/zsh"), bundles: [])))
